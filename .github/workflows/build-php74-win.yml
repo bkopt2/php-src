@@ -3,13 +3,11 @@ name: Build Patched PHP 7.4 (x64 NTS)
 on:
   workflow_dispatch:
   push:
-    branches: [ PHP-7.4 ]
+    branches: [ PHP-7.4, PHP-7.4-CVE-2026-109618-109619 ]
 
 env:
   # Official Windows builder (php/php-windows-builder), pinned
   BUILDER_SHA: 5f63433eb2bda2ca8d0d970fe487be84f7ab195c
-  PHP_SRC_REPO: php/php-src
-  PHP_SRC_SHA: 712e60f95271ee5d239fc5f417eb64ef75f9f27a
   BASE_VERSION: '7.4.33'
   VERSION_SUFFIX: '-pl1'
   SRC_DIR: build/x64/nts/php-src
@@ -25,18 +23,24 @@ jobs:
           git config --global core.eol lf
 
       - name: Checkout php-windows-builder
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: php/php-windows-builder
           ref: ${{ env.BUILDER_SHA }}
           path: builder
 
-      - name: Checkout php-src
-        uses: actions/checkout@v5
+      - name: Checkout patched php-src (712e60f)
+        uses: actions/checkout@v6
         with:
-          repository: ${{ env.PHP_SRC_REPO }}
-          ref: ${{ env.PHP_SRC_SHA }}
+          repository: php/php-src
+          ref: PHP-7.4-CVE-2026-109618-109619
           path: ${{ env.SRC_DIR }}
+
+      - name: Verify commit 712e60f is checked out
+        shell: pwsh
+        working-directory: ${{ env.SRC_DIR }}
+        run: |
+          git log -1 --oneline
 
       - name: Set version
         shell: pwsh
@@ -72,7 +76,7 @@ jobs:
           Invoke-PhpBuild -Arch x64 -Ts nts
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: php-7.4.33-pl1-x64-nts
           path: ${{ env.SRC_DIR }}/artifacts/*
