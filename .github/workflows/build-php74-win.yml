@@ -1,0 +1,47 @@
+name: Build Patched PHP 7.4 (x64 NTS)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout patched PHP-7.4 source
+        uses: actions/checkout@v4
+        with:
+          ref: PHP-7.4
+          path: php-src
+
+      - name: Install VC15 (VS 2017) Build Tools & Compile PHP 7.4
+        shell: pwsh
+        run: |
+          # 1. Ensure VS 2017 C++ toolset (v141 / VC15) is present on the runner
+          $vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Start-Process -FilePath $vsInstaller -ArgumentList "modify --installPath `"$vsPath`" --add Microsoft.VisualStudio.Component.VC.v141.x86.x64 --quiet --norestart" -Wait
+
+          # 2. Clone the official PHP Windows SDK
+          git clone --depth 1 https://github.com/microsoft/php-sdk-binary-tools.git C:\php-sdk
+
+          # 3. Prepare the build tree and move checked-out PHP-7.4 source into it
+          New-Item -ItemType Directory -Force -Path C:\php-sdk\phpdev\vc15\x64 | Out-Null
+          Move-Item -Path "$env:GITHUB_WORKSPACE\php-src" -Destination "C:\php-sdk\phpdev\vc15\x64\php-src"
+
+          # 4. Write the batch build script that matches your IIS phpinfo()
+          @"
+          cd /d C:\php-sdk\phpdev\vc15\x64\php-src
+          call phpsdk_deps --update --branch 7.4
+          call buildconf.bat
+          call configure.bat --enable-snapshot-build --disable-zts --enable-object-out-dir=../obj/ --without-analyzer
+          nmake snap
+          "@ | Set-Content -Path C:\php-sdk\run-build.bat -Encoding ASCII
+
+          # 5. Execute inside the VC15 x64 SDK shell
+          cmd.exe /c "C:\php-sdk\phpsdk-starter.bat -c vc15 -a x64 -t C:\php-sdk\run-build.bat"
+
+      - name: Upload Compiled PHP 7.4 ZIP Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: php-7.4-patched-nts-vc15-x64
+          path: C:\php-sdk\phpdev\vc15\x64\obj\Release\php-7.4*.zip
