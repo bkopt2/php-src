@@ -2,46 +2,84 @@ name: Build Patched PHP 7.4 (x64 NTS)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ PHP-7.4 ]
+
+env:
+  # Official Windows builder (php/php-windows-builder), pinned
+  BUILDER_SHA: 5f63433eb2bda2ca8d0d970fe487be84f7ab195c
+  PHP_SRC_REPO: php/php-src
+  PHP_SRC_SHA: 712e60f95271ee5d239fc5f417eb64ef75f9f27a
+  BASE_VERSION: '7.4.33'
+  VERSION_SUFFIX: '-pl1'
+  SRC_DIR: build/x64/nts/php-src
 
 jobs:
-  build-windows:
+  build:
+    name: Build 7.4 x64 nts
     runs-on: windows-2022
     steps:
-      - name: Checkout patched PHP-7.4 source
-        uses: actions/checkout@v4
-        with:
-          ref: PHP-7.4
-          path: php-src
-
-      - name: Install VC15 (VS 2017) Build Tools & Compile PHP 7.4
-        shell: pwsh
+      - name: git config
         run: |
-          # 1. Ensure VS 2017 C++ toolset (v141 / VC15) is present on the runner
-          $vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
-          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          Start-Process -FilePath $vsInstaller -ArgumentList "modify --installPath `"$vsPath`" --add Microsoft.VisualStudio.Component.VC.v141.x86.x64 --quiet --norestart" -Wait
+          git config --global core.autocrlf false
+          git config --global core.eol lf
 
-          # 2. Clone the official PHP Windows SDK
-          git clone --depth 1 https://github.com/microsoft/php-sdk-binary-tools.git C:\php-sdk
+      - name: Checkout php-windows-builder
+        uses: actions/checkout@v5
+        with:
+          repository: php/php-windows-builder
+          ref: ${{ env.BUILDER_SHA }}
+          path: builder
 
-          # 3. Prepare the build tree and move checked-out PHP-7.4 source into it
-          New-Item -ItemType Directory -Force -Path C:\php-sdk\phpdev\vc15\x64 | Out-Null
-          Move-Item -Path "$env:GITHUB_WORKSPACE\php-src" -Destination "C:\php-sdk\phpdev\vc15\x64\php-src"
+      - name: Checkout php-src
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.PHP_SRC_REPO }}
+          ref: ${{ env.PHP_SRC_SHA }}
+          path: ${{ env.SRC_DIR }}
 
-          # 4. Write the batch build script that matches your IIS phpinfo()
-          @"
-          cd /d C:\php-sdk\phpdev\vc15\x64\php-src
-          call phpsdk_deps --update --branch 7.4
-          call buildconf.bat
-          call configure.bat --enable-snapshot-build --disable-zts --enable-object-out-dir=../obj/ --without-analyzer
-          nmake snap
-          "@ | Set-Content -Path C:\php-sdk\run-build.bat -Encoding ASCII
+      - name: Set version
+        shell: pwsh
+        working-directory: ${{ env.SRC_DIR }}
+        run: |
+          $version = "$env:BASE_VERSION$env:VERSION_SUFFIX"
+          [int]$major, [int]$minor, [int]$release = $env:BASE_VERSION.Split('.')
+          $patches = @(
+            @{ File = 'configure.ac'; From = 'AC_INIT\(\[PHP\],\[[^\]]+\]'; To = "AC_INIT([PHP],[$version]" },
+            @{ File = 'main/php_version.h'; From = "#define PHP_MAJOR_VERSION $major\b"; To = "#define PHP_MAJOR_VERSION $major" },
+            @{ File = 'main/php_version.h'; From = "#define PHP_MINOR_VERSION $minor\b"; To = "#define PHP_MINOR_VERSION $minor" },
+            @{ File = 'main/php_version.h'; From = '#define PHP_RELEASE_VERSION \d+'; To = "#define PHP_RELEASE_VERSION $release" },
+            @{ File = 'main/php_version.h'; From = '#define PHP_EXTRA_VERSION "[^"]*"'; To = "#define PHP_EXTRA_VERSION `"$env:VERSION_SUFFIX`"" },
+            @{ File = 'main/php_version.h'; From = '#define PHP_VERSION "[^"]*"'; To = "#define PHP_VERSION `"$version`"" },
+            @{ File = 'main/php_version.h'; From = '#define PHP_VERSION_ID \d+'; To = "#define PHP_VERSION_ID $($major * 10000 + $minor * 100 + $release)" }
+          )
+          foreach ($p in $patches) {
+            $content = Get-Content $p.File -Raw
+            $count = ([regex]::Matches($content, $p.From)).Count
+            if ($count -ne 1) { throw "$($p.File): '$($p.From)' matched $count times" }
+            Set-Content $p.File ([regex]::Replace($content, $p.From, $p.To)) -NoNewline
+          }
+          git diff
 
-          # 5. Execute inside the VC15 x64 SDK shell
-          cmd.exe /c "C:\php-sdk\phpsdk-starter.bat -c vc15 -a x64 -t C:\php-sdk\run-build.bat"
+      - name: Build
+        shell: pwsh
+        working-directory: ${{ env.SRC_DIR }}
+        env:
+          SBOM: 'false'
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          Import-Module "$env:GITHUB_WORKSPACE\builder\php\BuildPhp" -Force
+          Invoke-PhpBuild -Arch x64 -Ts nts
 
-      - name: Upload Compiled PHP 7.4 ZIP Artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: php-7.4-patched-nts-vc15-x64
-          path: C:\php-sdk\phpdev\vc15\x64\obj\Release\php-7.4*.zip
+          name: php-7.4.33-pl1-x64-nts
+          path: ${{ env.SRC_DIR }}/artifacts/*
+
+      - name: Official smoke test
+        shell: pwsh
+        working-directory: ${{ env.SRC_DIR }}
+        run: |
+          Import-Module "$env:GITHUB_WORKSPACE\builder\php\BuildPhp" -Force
+          Invoke-PhpSmokeTests -ArtifactsDirectory artifacts -Arch x64 -Ts nts
